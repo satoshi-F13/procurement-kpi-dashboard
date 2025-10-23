@@ -1,0 +1,21 @@
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  // Find the download link in navbar
+  const downloadLink = document.querySelector('a[aria-label="Download CSV"]');
+  if (downloadLink) {
+    // Add download attribute
+    downloadLink.setAttribute('download', 'procurement_cleaned.csv');
+    
+    // Alternatively, replace with JavaScript download
+    downloadLink.onclick = function(e) {
+      e.preventDefault();
+      const link = document.createElement('a');
+      link.href = 'data/procurement_cleaned.csv';
+      link.download = 'procurement_cleaned.csv';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+  }
+});
+</script>

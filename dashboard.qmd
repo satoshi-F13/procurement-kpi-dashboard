@@ -7,6 +7,11 @@ format:
     orientation: rows
     scrolling: true
     expandable: true
+    nav-buttons:
+      - icon: download
+        href: data/procurement_cleaned.csv
+        aria-label: Download CSV
+include-in-header: download-nav.html
 date: today
 date-format: "MMMM D, YYYY"
 ---
