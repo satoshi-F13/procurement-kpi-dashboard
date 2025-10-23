@@ -1,0 +1,69 @@
+🧾 Purchase Order Overview
+
+How many purchase orders (POs) were issued over time (by month, quarter, or supplier)?
+
+What is the total spend (sum of quantity * unit_price) by supplier or item category?
+
+What is the average order value per PO or per supplier?
+
+Which suppliers or item categories represent the highest share of total spending?
+
+⏰ Timeliness and Delivery Performance
+
+What percentage of deliveries arrived on time (delivery_date - order_date)?
+
+Which suppliers have the most delayed deliveries on average?
+
+What is the average lead time between order and delivery for each supplier or category?
+
+Are certain item categories more prone to late delivery?
+
+💸 Cost and Price Analysis
+
+How often are negotiated prices (negotiated_price) actually achieved versus listed unit prices?
+
+What is the average discount achieved (i.e., (unit_price - negotiated_price)/unit_price)?
+
+Which suppliers consistently provide better negotiated terms?
+
+How much cost saving results from negotiations overall?
+
+⚙️ Quality and Defect Rate
+
+What is the defect rate (defective_units / quantity) per supplier or item category?
+
+Which suppliers have the highest defect rates?
+
+Is there a correlation between negotiated price and defect rate (e.g., cheaper = more defects)?
+
+Are late deliveries associated with higher defect rates?
+
+✅ Compliance and Supplier Reliability
+
+What percentage of POs are marked as compliant (compliance == "Yes") per supplier?
+
+Are non-compliant orders more likely to be late or defective?
+
+Which suppliers have the best compliance track record?
+
+Is compliance improving over time?
+
+📦 Order Status and Workflow
+
+What proportion of orders are still pending, completed, or cancelled (order_status)?
+
+Which suppliers or categories tend to have the highest cancellation rates?
+
+What is the average order size (quantity) by order status?
+
+How many repeat orders (same supplier + category) occur within a time frame?
+
+🔍 Strategic Insights
+
+Which suppliers provide the best balance of price, timeliness, and quality?
+
+Are there opportunities to consolidate suppliers for better pricing or reliability?
+
+What trends in delivery delays, defect rates, or compliance issues are emerging over time?
+
+Where are the main risks in the supply base (e.g., high cost + poor quality suppliers)?

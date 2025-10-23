@@ -1,0 +1,1299 @@
+---
+title: "Procurement KPI Management Dashboard"
+author: "S.Matsumoto"
+format: 
+  dashboard:
+    theme: [cosmo, custom.scss]
+    orientation: rows
+    scrolling: true
+    expandable: true
+date: today
+date-format: "MMMM D, YYYY"
+---
+```{r}
+#| label: setup
+#| include: false
+
+# Load required packages
+library(tidyverse)      # Includes ggplot2
+library(janitor)
+library(dplyr)
+library(ggplot2)        # Base plotting (already in tidyverse)
+library(flextable)
+library(scales)
+library(ggrepel)
+library(viridis)
+library(patchwork)
+library(lubridate)
+library(plotly)         # ONLY for ggplotly() function - converts ggplot to interactive
+library(DT)
+library(knitr)
+
+# Load and prepare data
+df <- read_csv("data/procurement_cleaned.csv")
+
+
+# Calculate summary metrics
+total_pos <- nrow(df)
+total_spend <- sum(df$total_order_value)
+total_savings <- sum(df$savings_amount)
+avg_discount <- mean(df$savings_pct)
+on_time_rate <- mean(df$lead_time_days <= 14, na.rm = TRUE) * 100
+avg_defect_rate <- mean(df$defect_rate, na.rm = TRUE)
+compliance_rate <- mean(df$compliant) * 100
+active_suppliers <- n_distinct(df$supplier)
+
+# ggplot2 theme settings
+theme_set(theme_minimal(base_size = 12))
+custom_colors <- c("#2C3E50", "#E74C3C", "#3498DB", "#27AE60", "#F39C12")
+```
+
+# Purchase Order Overview
+
+## Row {height="12%"}
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Total Purchase Orders"
+#| icon: file-earmark-text
+#| color: primary
+
+list(
+  value = format(total_pos, big.mark = ",")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Total Spend"
+#| icon: currency-dollar
+#| color: success
+
+list(
+  value = paste0("$", format(round(total_spend / 1e6, 2), big.mark = ","), "M")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Total Savings"
+#| icon: piggy-bank
+#| color: info
+
+list(
+  value = paste0("$", format(round(total_savings / 1e6, 2), big.mark = ","), "M")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Active Suppliers"
+#| icon: people-fill
+#| color: warning
+
+list(
+  value = active_suppliers
+)
+```
+
+## Row {height="40%"}
+
+### {width="60%"}
+```{r}
+#| title: "Purchase Orders Over Time"
+#| fig-width: 10
+#| fig-height: 5
+
+po_timeline <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    po_count = n(),
+    total_spend = sum(total_order_value, na.rm = TRUE)
+  )
+
+# Create ggplot2 object
+p <- ggplot(po_timeline, aes(x = order_month, y = po_count)) +
+  geom_line(color = "#2C3E50", linewidth = 1.2) +
+  geom_point(color = "#E74C3C", size = 3) +
+  geom_area(fill = "#3498DB", alpha = 0.2) +
+  labs(title = "", x = "Month", y = "Number of POs") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid.minor = element_blank())
+
+# Convert ggplot to interactive plotly
+ggplotly(p, tooltip = c("x", "y"))
+```
+
+### {width="40%"}
+```{r}
+#| title: "PO Trend by Supplier"
+#| fig-width: 8
+#| fig-height: 5
+
+# Create ggplot2 object
+p <- df %>%
+  count(supplier, order_month) %>%
+  ggplot(aes(x = order_month, y = n, color = supplier)) +
+  geom_line(linewidth = 1.2) +
+  labs(title = "", x = "Month", y = "PO Count", color = "Supplier") +
+  scale_color_viridis_d() +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Supplier Spend - Pareto Analysis"
+#| fig-width: 9
+#| fig-height: 5
+
+top_suppliers <- df %>%
+  group_by(supplier) %>%
+  summarise(total_spend = sum(total_order_value)) %>%
+  arrange(desc(total_spend)) %>%
+  mutate(
+    spend_pct = total_spend / sum(total_spend) * 100,
+    cum_pct = cumsum(spend_pct)
+  )
+
+# Create ggplot2 object with dual axis
+p <- ggplot(top_suppliers, aes(x = reorder(supplier, -total_spend))) +
+  geom_col(aes(y = total_spend), fill = "#3498DB", alpha = 0.8) +
+  geom_line(aes(y = cum_pct * max(total_spend) / 100, group = 1), 
+            color = "#E74C3C", linewidth = 1.5) +
+  geom_point(aes(y = cum_pct * max(total_spend) / 100), 
+             color = "#E74C3C", size = 4) +
+  scale_y_continuous(
+    labels = dollar_format(scale = 1e-3, suffix = "K"),
+    sec.axis = sec_axis(~ . * 100 / max(top_suppliers$total_spend), 
+                        name = "Cumulative %", labels = percent_format(scale = 1))
+  ) +
+  labs(title = "", x = "Supplier", y = "Total Spend") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Spend Distribution by Category"
+#| fig-width: 9
+#| fig-height: 5
+
+category_spend <- df %>%
+  group_by(item_category) %>%
+  summarise(total_spend = sum(total_order_value)) %>%
+  mutate(pct = total_spend / sum(total_spend) * 100) %>%
+  arrange(desc(total_spend))
+
+# Create ggplot2 pie chart
+p <- p <- ggplot(category_spend, aes(x = "", y = pct, fill = item_category)) +
+  geom_col(width = 1, color = "white", linewidth = 2) +
+  coord_polar("y", start = 0) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(title = "", fill = "Category") +
+  theme_void(base_size = 14) +
+  theme(legend.position = "right") +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), 
+            position = position_stack(vjust = 0.5),
+            size = 5, fontface = "bold", color = "white")
+# Convert to interactive
+p
+```
+
+# Cost & Price
+
+## Row {height="12%"}
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Average Discount"
+#| icon: percent
+#| color: success
+
+list(
+  value = paste0(round(avg_discount, 1), "%")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Total Cost Savings"
+#| icon: graph-up-arrow
+#| color: info
+
+list(
+  value = paste0("$", format(round(total_savings / 1000, 0), big.mark = ","), "K")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Avg Savings per PO"
+#| icon: receipt
+#| color: primary
+
+avg_savings_per_po <- mean(df$savings_amount)
+list(
+  value = paste0("$", format(round(avg_savings_per_po, 0), big.mark = ","))
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Negotiation Success Rate"
+#| icon: handshake
+#| color: warning
+
+negotiation_success <- mean(df$negotiated_price < df$unit_price) * 100
+list(
+  value = paste0(round(negotiation_success, 1), "%")
+)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Average Discount by Supplier"
+#| fig-width: 9
+#| fig-height: 5
+
+supplier_negotiations <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    po_count = n(),
+    avg_discount_pct = mean(savings_pct),
+    total_savings = sum(savings_amount)
+  ) %>%
+  arrange(desc(avg_discount_pct))
+
+# Create ggplot2 bar chart
+p <- ggplot(supplier_negotiations, 
+            aes(x = reorder(supplier, avg_discount_pct), 
+                y = avg_discount_pct)) +
+  geom_col(fill = "#27AE60", alpha = 0.8) +
+  geom_text(aes(label = paste0(round(avg_discount_pct, 1), "%")), 
+            hjust = -0.2, size = 4, fontface = "bold") +
+  coord_flip() +
+  labs(title = "", x = "Supplier", y = "Average Discount (%)") +
+  ylim(0, max(supplier_negotiations$avg_discount_pct) * 1.15) +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Price Negotiation Distribution"
+#| fig-width: 9
+#| fig-height: 5
+
+# Create ggplot2 histogram
+p <- ggplot(df, aes(x = savings_pct)) +
+  geom_histogram(bins = 30, fill = "#3498DB", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = mean(df$savings_pct), 
+             color = "#E74C3C", linetype = "dashed", linewidth = 1.5) +
+  annotate("text", x = mean(df$savings_pct) + 1, 
+           y = Inf, vjust = 2,
+           label = paste0("Mean: ", round(mean(df$savings_pct), 1), "%"),
+           color = "#E74C3C", fontface = "bold", size = 5) +
+  labs(title = "", x = "Discount Percentage (%)", y = "Count") +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="40%"}
+
+### {width="60%"}
+```{r}
+#| title: "Cost Savings Over Time"
+#| fig-width: 10
+#| fig-height: 5
+
+savings_timeline <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    total_savings = sum(savings_amount),
+    avg_discount = mean(savings_pct)
+  )
+
+# Create ggplot2 area chart
+p <- ggplot(savings_timeline, aes(x = order_month)) +
+  geom_line(aes(y = total_savings), color = "#27AE60", linewidth = 1.5) +
+  geom_area(aes(y = total_savings), fill = "#27AE60", alpha = 0.3) +
+  labs(title = "", x = "Month", y = "Total Savings ($)") +
+  scale_y_continuous(labels = dollar_format()) +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="40%"}
+```{r}
+#| title: "Savings by Category"
+#| fig-width: 8
+#| fig-height: 5
+
+category_savings <- df %>%
+  group_by(item_category) %>%
+  summarise(
+    total_savings = sum(savings_amount),
+    avg_discount = mean(savings_pct)
+  ) %>%
+  arrange(desc(total_savings))
+
+# Create ggplot2 bar chart
+p <- ggplot(category_savings, 
+            aes(x = reorder(item_category, total_savings), 
+                y = total_savings)) +
+  geom_col(aes(fill = avg_discount), alpha = 0.8) +
+  scale_fill_gradient(low = "#F39C12", high = "#27AE60", 
+                      name = "Avg Discount %") +
+  coord_flip() +
+  labs(title = "", x = "Category", y = "Total Savings ($)") +
+  scale_y_continuous(labels = dollar_format()) +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+# Quality & Defect
+
+## Row {height="12%"}
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Average Defect Rate"
+#| icon: exclamation-triangle
+#| color: danger
+
+list(
+  value = paste0(round(avg_defect_rate, 2), "%")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Total Defective Units"
+#| icon: x-circle
+#| color: warning
+
+total_defective <- sum(df$defective_units, na.rm = TRUE)
+list(
+  value = format(total_defective, big.mark = ",")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Orders with Defects"
+#| icon: clipboard-data
+#| color: info
+
+orders_with_defects <- sum(df$defect_rate > 0, na.rm = TRUE)
+pct_with_defects <- mean(df$defect_rate > 0, na.rm = TRUE) * 100
+list(
+  value = paste0(orders_with_defects, " (", round(pct_with_defects, 1), "%)")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "High Defect Orders (>10%)"
+#| icon: bug
+#| color: danger
+
+high_defect_orders <- sum(df$defect_rate > 10, na.rm = TRUE)
+list(
+  value = high_defect_orders
+)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Defect Rate by Supplier"
+#| fig-width: 9
+#| fig-height: 5
+
+supplier_quality <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  group_by(supplier) %>%
+  summarise(
+    orders = n(),
+    avg_defect_rate = mean(defect_rate),
+    total_defective = sum(defective_units),
+    high_defect_orders = sum(defect_rate > 10)
+  ) %>%
+  arrange(desc(avg_defect_rate))
+
+# Create ggplot2 bar chart
+p <- ggplot(supplier_quality, 
+            aes(x = reorder(supplier, -avg_defect_rate), 
+                y = avg_defect_rate)) +
+  geom_col(aes(fill = avg_defect_rate)) +
+  scale_fill_gradient(low = "#27AE60", high = "#E74C3C", 
+                      name = "Defect Rate %") +
+  geom_text(aes(label = paste0(round(avg_defect_rate, 2), "%")), 
+            vjust = -0.5, size = 4, fontface = "bold") +
+  labs(title = "", x = "Supplier", y = "Defect Rate (%)") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Defect Rate by Category"
+#| fig-width: 9
+#| fig-height: 5
+
+category_quality <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  group_by(item_category) %>%
+  summarise(
+    orders = n(),
+    avg_defect_rate = mean(defect_rate),
+    median_defect_rate = median(defect_rate)
+  ) %>%
+  arrange(desc(avg_defect_rate))
+
+# Create ggplot2 bar chart
+p <- ggplot(category_quality, 
+            aes(x = reorder(item_category, -avg_defect_rate), 
+                y = avg_defect_rate)) +
+  geom_col(fill = "#E74C3C", alpha = 0.8) +
+  geom_text(aes(label = paste0(round(avg_defect_rate, 2), "%")), 
+            vjust = -0.5, size = 4, fontface = "bold") +
+  labs(title = "", x = "Category", y = "Average Defect Rate (%)") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Price vs Quality Correlation"
+#| fig-width: 9
+#| fig-height: 5
+
+price_quality <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  select(negotiated_price, defect_rate, supplier, item_category)
+
+cor_test <- cor.test(price_quality$negotiated_price, 
+                     price_quality$defect_rate)
+
+# Create ggplot2 scatter plot
+p <- ggplot(price_quality, aes(x = negotiated_price, y = defect_rate)) +
+  geom_point(aes(color = supplier, shape = item_category), 
+             alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", 
+              linetype = "dashed", linewidth = 1.2) +
+  scale_color_viridis_d() +
+  labs(title = paste0("Correlation: r = ", round(cor_test$estimate, 3),
+                     ", p = ", round(cor_test$p.value, 4)),
+       x = "Negotiated Price ($)", y = "Defect Rate (%)",
+       color = "Supplier", shape = "Category") +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Late Delivery vs Defect Rate"
+#| fig-width: 9
+#| fig-height: 5
+
+late_vs_defect_data <- df %>%
+  filter(!is.na(defect_rate), !is.na(lead_time_days)) %>%
+  mutate(delivery_status = ifelse(lead_time_days > 14, "Late", "On Time"))
+
+# Create ggplot2 boxplot
+p <- ggplot(late_vs_defect_data, 
+            aes(x = delivery_status, y = defect_rate, fill = delivery_status)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 3) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_fill_manual(values = c("Late" = "#E74C3C", "On Time" = "#27AE60")) +
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 4, 
+               fill = "yellow", color = "black") +
+  labs(title = "", x = "Delivery Status", y = "Defect Rate (%)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+# Compliance & Reliability
+
+## Row {height="12%"}
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Overall Compliance Rate"
+#| icon: check-circle
+#| color: success
+
+list(
+  value = paste0(round(compliance_rate, 1), "%")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "On-Time Delivery Rate"
+#| icon: clock
+#| color: info
+
+list(
+  value = paste0(round(on_time_rate, 1), "%")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Average Lead Time"
+#| icon: calendar-range
+#| color: primary
+
+avg_lead_time <- mean(df$lead_time_days, na.rm = TRUE)
+list(
+  value = paste0(round(avg_lead_time, 1), " days")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Late Deliveries"
+#| icon: exclamation-circle
+#| color: warning
+
+late_deliveries <- sum(df$lead_time_days > 14, na.rm = TRUE)
+late_pct <- mean(df$lead_time_days > 14, na.rm = TRUE) * 100
+list(
+  value = paste0(late_deliveries, " (", round(late_pct, 1), "%)")
+)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Supplier Compliance Rates"
+#| fig-width: 9
+#| fig-height: 5
+
+compliance_by_supplier <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    total_orders = n(),
+    compliant_orders = sum(compliant),
+    compliance_rate = mean(compliant) * 100
+  ) %>%
+  arrange(desc(compliance_rate))
+
+# Create ggplot2 bar chart
+p <- ggplot(compliance_by_supplier, 
+            aes(x = reorder(supplier, compliance_rate), 
+                y = compliance_rate)) +
+  geom_col(aes(fill = compliance_rate)) +
+  scale_fill_gradient(low = "#E74C3C", high = "#27AE60", 
+                      name = "Compliance %") +
+  geom_text(aes(label = paste0(round(compliance_rate, 1), "%")), 
+            hjust = -0.2, size = 4, fontface = "bold") +
+  coord_flip() +
+  ylim(0, 105) +
+  labs(title = "", x = "Supplier", y = "Compliance Rate (%)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Delivery Performance by Supplier"
+#| fig-width: 9
+#| fig-height: 5
+
+supplier_delivery <- df %>%
+  filter(!is.na(lead_time_days)) %>%
+  group_by(supplier) %>%
+  summarise(
+    deliveries = n(),
+    avg_lead_time = mean(lead_time_days),
+    on_time_pct = mean(lead_time_days <= 14) * 100
+  ) %>%
+  arrange(desc(avg_lead_time))
+
+# Create ggplot2 bar chart with reference line
+p <- ggplot(supplier_delivery, 
+            aes(x = reorder(supplier, avg_lead_time), 
+                y = avg_lead_time)) +
+  geom_col(aes(fill = on_time_pct), color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = 14, linetype = "dashed", 
+             color = "red", linewidth = 1.5) +
+  annotate("text", x = 0.5, y = 15, label = "Target: 14 days",
+           color = "red", vjust = -0.5, fontface = "bold") +
+  scale_fill_gradient(low = "#E74C3C", high = "#27AE60", 
+                      name = "On-Time %") +
+  coord_flip() +
+  labs(title = "", x = "Supplier", y = "Average Lead Time (days)") +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="40%"}
+
+### {width="60%"}
+```{r}
+#| title: "Compliance Trend Over Time"
+#| fig-width: 10
+#| fig-height: 5
+
+compliance_trend <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    compliance_rate = mean(compliant) * 100,
+    on_time_rate = mean(lead_time_days <= 14, na.rm = TRUE) * 100,
+    orders = n()
+  )
+
+# Create ggplot2 line chart
+p <- compliance_trend %>%
+  pivot_longer(cols = c(compliance_rate, on_time_rate),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = case_when(
+    metric == "compliance_rate" ~ "Compliance Rate",
+    metric == "on_time_rate" ~ "On-Time Delivery Rate"
+  )) %>%
+  ggplot(aes(x = order_month, y = value, color = metric)) +
+  geom_line(linewidth = 1.5) +
+  geom_point(size = 3) +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.2) +
+  scale_color_manual(values = c("#3498DB", "#27AE60")) +
+  labs(title = "", x = "Month", y = "Rate (%)", color = "Metric") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="40%"}
+```{r}
+#| title: "Non-Compliant Orders Impact"
+#| fig-width: 8
+#| fig-height: 5
+
+non_compliance_impact <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(compliance) %>%
+  summarise(
+    count = n(),
+    avg_lead_time = mean(lead_time_days),
+    pct_late = mean(lead_time_days > 14) * 100,
+    avg_defect_rate = mean(defect_rate)
+  ) %>%
+  pivot_longer(cols = c(avg_lead_time, pct_late, avg_defect_rate),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = case_when(
+    metric == "avg_lead_time" ~ "Avg Lead Time (days)",
+    metric == "pct_late" ~ "Late Delivery %",
+    metric == "avg_defect_rate" ~ "Avg Defect Rate %"
+  ))
+
+# Create ggplot2 faceted bar chart
+p <- ggplot(non_compliance_impact, 
+            aes(x = compliance, y = value, fill = compliance)) +
+  geom_col(alpha = 0.8) +
+  facet_wrap(~metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c("No" = "#E74C3C", "Yes" = "#27AE60")) +
+  labs(title = "", x = "Compliance Status", y = "Value") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 12))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+# Order Status & Workflow
+
+## Row {height="12%"}
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Delivered Orders"
+#| icon: check-square
+#| color: success
+
+delivered_orders <- sum(df$order_status == "Delivered")
+delivered_pct <- mean(df$order_status == "Delivered") * 100
+list(
+  value = paste0(delivered_orders, " (", round(delivered_pct, 1), "%)")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Pending Orders"
+#| icon: hourglass-split
+#| color: warning
+
+pending_orders <- sum(df$order_status == "Pending")
+pending_pct <- mean(df$order_status == "Pending") * 100
+list(
+  value = paste0(pending_orders, " (", round(pending_pct, 1), "%)")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Cancelled Orders"
+#| icon: x-square
+#| color: danger
+
+cancelled_orders <- sum(df$order_status == "Cancelled")
+cancelled_pct <- mean(df$order_status == "Cancelled") * 100
+list(
+  value = paste0(cancelled_orders, " (", round(cancelled_pct, 1), "%)")
+)
+```
+
+### {.value-box}
+```{r}
+#| content: valuebox
+#| title: "Cancellation Rate"
+#| icon: graph-down
+#| color: info
+
+list(
+  value = paste0(round(cancelled_pct, 1), "%")
+)
+```
+
+## Row {height="40%"}
+
+### {width="40%"}
+```{r}
+#| title: "Order Status Distribution"
+#| fig-width: 8
+#| fig-height: 5
+
+status_summary <- df %>%
+  count(order_status) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  arrange(desc(n))
+
+# Create ggplot2 bar chart
+p <- ggplot(status_summary, aes(x = reorder(order_status, n), y = n)) +
+  geom_col(aes(fill = order_status), alpha = 0.8) +
+  geom_text(aes(label = paste0(n, "\n(", round(pct, 1), "%)")), 
+            hjust = -0.2, size = 4, fontface = "bold") +
+  scale_fill_viridis_d(option = "turbo") +
+  coord_flip() +
+  labs(title = "", x = "Order Status", y = "Count") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="60%"}
+```{r}
+#| title: "Order Status Over Time"
+#| fig-width: 10
+#| fig-height: 5
+
+status_timeline <- df %>%
+  count(order_month, order_status) %>%
+  group_by(order_month) %>%
+  mutate(pct = n / sum(n) * 100)
+
+# Create ggplot2 stacked area chart
+p <- ggplot(status_timeline, aes(x = order_month, y = n, fill = order_status)) +
+  geom_area(alpha = 0.7, position = "stack") +
+  scale_fill_viridis_d(option = "turbo", name = "Status") +
+  labs(title = "", x = "Month", y = "Number of Orders") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "top")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="40%"}
+
+### {width="50%"}
+```{r}
+#| title: "Cancellation Rate by Supplier"
+#| fig-width: 9
+#| fig-height: 5
+
+cancellation_analysis <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    total_orders = n(),
+    cancelled = sum(order_status == "Cancelled"),
+    cancellation_rate = cancelled / total_orders * 100
+  ) %>%
+  arrange(desc(cancellation_rate))
+
+# Create ggplot2 bar chart
+p <- ggplot(cancellation_analysis, 
+            aes(x = reorder(supplier, -cancellation_rate), 
+                y = cancellation_rate)) +
+  geom_col(fill = "#E74C3C", alpha = 0.8) +
+  geom_text(aes(label = paste0(round(cancellation_rate, 1), "%\n(", 
+                               cancelled, " orders)")), 
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  labs(title = "", x = "Supplier", y = "Cancellation Rate (%)") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Order Size by Status"
+#| fig-width: 9
+#| fig-height: 5
+
+# Create ggplot2 violin + boxplot
+p <- ggplot(df, aes(x = order_status, y = quantity, fill = order_status)) +
+  geom_violin(alpha = 0.7, draw_quantiles = c(0.25, 0.5, 0.75)) +
+  geom_boxplot(width = 0.2, alpha = 0.5, outlier.alpha = 0) +
+  scale_y_log10(labels = comma) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(title = "", x = "Order Status", y = "Quantity (log scale)") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+# Insights
+
+## Row {height="40%"}
+
+### {width="60%"}
+```{r}
+#| title: "Supplier Performance Matrix"
+#| fig-width: 10
+#| fig-height: 6
+
+supplier_scorecard <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(supplier) %>%
+  summarise(
+    avg_discount = mean(savings_pct),
+    price_score = scales::rescale(avg_discount, to = c(0, 100)),
+    avg_lead_time = mean(lead_time_days),
+    on_time_pct = mean(lead_time_days <= 14) * 100,
+    delivery_score = on_time_pct,
+    avg_defect_rate = mean(defect_rate),
+    quality_score = 100 - scales::rescale(avg_defect_rate, to = c(0, 100)),
+    compliance_rate = mean(compliant) * 100,
+    overall_score = (price_score + delivery_score + quality_score + compliance_rate) / 4,
+    total_spend = sum(total_order_value),
+    order_count = n()
+  ) %>%
+  arrange(desc(overall_score))
+
+# Create ggplot2 scatter plot
+p <- ggplot(supplier_scorecard, 
+            aes(x = delivery_score, y = quality_score)) +
+  geom_point(aes(size = total_spend, color = price_score), alpha = 0.7) +
+  geom_text_repel(aes(label = supplier), size = 4, fontface = "bold",
+                  box.padding = 0.5, max.overlaps = 15) +
+  scale_color_gradient2(low = "#E74C3C", mid = "#F39C12", high = "#27AE60",
+                        midpoint = 50, name = "Price Score") +
+  scale_size_continuous(name = "Total Spend", labels = dollar_format()) +
+  labs(title = "",
+       x = "Delivery Performance Score", 
+       y = "Quality Performance Score") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "right")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="40%"}
+```{r}
+#| title: "Overall Supplier Ranking"
+#| fig-width: 8
+#| fig-height: 6
+
+# Create ggplot2 bar chart
+p <- ggplot(supplier_scorecard, 
+            aes(x = reorder(supplier, overall_score), 
+                y = overall_score)) +
+  geom_col(aes(fill = overall_score), alpha = 0.8) +
+  scale_fill_gradient2(low = "#E74C3C", mid = "#F39C12", high = "#27AE60",
+                       midpoint = 50, name = "Score") +
+  geom_text(aes(label = round(overall_score, 1)), 
+            hjust = -0.2, size = 4, fontface = "bold") +
+  coord_flip() +
+  ylim(0, 105) +
+  labs(title = "", x = "Supplier", y = "Overall Performance Score") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="30%"}
+
+### {width="50%"}
+```{r}
+#| title: "Supplier Risk Matrix"
+#| fig-width: 9
+#| fig-height: 5
+
+risk_analysis <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    avg_price = mean(unit_price),
+    avg_defect_rate = mean(defect_rate, na.rm = TRUE),
+    total_spend = sum(total_order_value),
+    compliance_rate = mean(compliant) * 100
+  ) %>%
+  mutate(
+    risk_category = case_when(
+      avg_price > median(avg_price) & avg_defect_rate > median(avg_defect_rate, na.rm = TRUE) ~ "High Risk",
+      avg_price < median(avg_price) & avg_defect_rate < median(avg_defect_rate, na.rm = TRUE) ~ "Low Risk",
+      avg_price > median(avg_price) ~ "High Cost",
+      TRUE ~ "Quality Concern"
+    )
+  )
+
+# Create ggplot2 scatter plot with quadrants
+p <- ggplot(risk_analysis, aes(x = avg_price, y = avg_defect_rate)) +
+  geom_point(aes(size = total_spend, color = risk_category), alpha = 0.7) +
+  geom_text_repel(aes(label = supplier), size = 4, fontface = "bold") +
+  geom_vline(xintercept = median(risk_analysis$avg_price), 
+             linetype = "dashed", alpha = 0.5, linewidth = 1) +
+  geom_hline(yintercept = median(risk_analysis$avg_defect_rate, na.rm = TRUE), 
+             linetype = "dashed", alpha = 0.5, linewidth = 1) +
+  scale_color_manual(values = c("High Risk" = "#E74C3C", 
+                                 "Low Risk" = "#27AE60",
+                                 "High Cost" = "#F39C12",
+                                 "Quality Concern" = "#3498DB"),
+                     name = "Risk Category") +
+  scale_size_continuous(name = "Total Spend", labels = dollar_format()) +
+  labs(title = "",
+       x = "Average Unit Price ($)", 
+       y = "Average Defect Rate (%)") +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+### {width="50%"}
+```{r}
+#| title: "Consolidation Opportunities"
+#| fig-width: 9
+#| fig-height: 5
+
+consolidation_analysis <- df %>%
+  group_by(item_category) %>%
+  summarise(
+    unique_suppliers = n_distinct(supplier),
+    total_orders = n(),
+    total_spend = sum(total_order_value),
+    avg_price = mean(unit_price)
+  ) %>%
+  arrange(desc(unique_suppliers))
+
+# Create ggplot2 bar chart
+p <- ggplot(consolidation_analysis, 
+            aes(x = reorder(item_category, unique_suppliers), 
+                y = unique_suppliers)) +
+  geom_col(aes(fill = total_spend), alpha = 0.8) +
+  geom_text(aes(label = paste0(unique_suppliers, " suppliers\n",
+                               total_orders, " orders")), 
+            hjust = -0.1, size = 3.5, fontface = "bold") +
+  scale_fill_gradient(low = "#3498DB", high = "#E74C3C", 
+                      name = "Total Spend", labels = dollar_format()) +
+  coord_flip() +
+  labs(title = "", 
+       x = "Category", 
+       y = "Number of Unique Suppliers") +
+  theme_minimal(base_size = 14)
+
+# Convert to interactive
+ggplotly(p)
+```
+
+## Row {height="30%"}
+
+### {width="100%"}
+```{r}
+#| title: "KPI Trend Analysis"
+#| fig-width: 12
+#| fig-height: 5
+
+trend_analysis <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(order_quarter, order_year) %>%
+  summarise(
+    avg_lead_time = mean(lead_time_days),
+    avg_defect_rate = mean(defect_rate),
+    compliance_rate = mean(compliant) * 100,
+    avg_discount = mean(savings_pct),
+    .groups = "drop"
+  ) %>%
+  mutate(period = paste0(order_year, "-Q", order_quarter))
+
+# Create ggplot2 faceted line chart
+p <- trend_analysis %>%
+  pivot_longer(cols = c(avg_lead_time, avg_defect_rate, 
+                       compliance_rate, avg_discount),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric = case_when(
+    metric == "avg_lead_time" ~ "Lead Time (days)",
+    metric == "avg_defect_rate" ~ "Defect Rate (%)",
+    metric == "compliance_rate" ~ "Compliance Rate (%)",
+    metric == "avg_discount" ~ "Discount (%)"
+  )) %>%
+  ggplot(aes(x = period, y = value, color = metric, group = metric)) +
+  geom_line(linewidth = 1.5) +
+  geom_point(size = 3) +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.2) +
+  facet_wrap(~metric, scales = "free_y", ncol = 4) +
+  scale_color_viridis_d() +
+  labs(title = "", x = "Quarter", y = "Value") +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        strip.text = element_text(face = "bold", size = 12))
+
+# Convert to interactive
+ggplotly(p)
+```
+
+# Summary
+
+## Row {height="50%"}
+
+### {width="100%"}
+```{r}
+#| title: "Executive Summary Report"
+
+executive_summary <- data.frame(
+  Metric = c(
+    "Total Purchase Orders",
+    "Total Spend",
+    "Total Savings from Negotiations",
+    "Average Discount Achieved",
+    "On-Time Delivery Rate",
+    "Average Lead Time",
+    "Average Defect Rate",
+    "Total Defective Units",
+    "Overall Compliance Rate",
+    "Cancellation Rate",
+    "Active Suppliers",
+    "Categories Managed"
+  ),
+  Value = c(
+    format(total_pos, big.mark = ","),
+    paste0("$", format(round(total_spend, 0), big.mark = ",")),
+    paste0("$", format(round(total_savings, 0), big.mark = ",")),
+    paste0(round(avg_discount, 2), "%"),
+    paste0(round(on_time_rate, 1), "%"),
+    paste0(round(mean(df$lead_time_days, na.rm = TRUE), 1), " days"),
+    paste0(round(avg_defect_rate, 2), "%"),
+    format(sum(df$defective_units, na.rm = TRUE), big.mark = ","),
+    paste0(round(compliance_rate, 1), "%"),
+    paste0(round(mean(df$order_status == "Cancelled") * 100, 1), "%"),
+    active_suppliers,
+    n_distinct(df$item_category)
+  ),
+  Status = c(
+    "📊", "💰", "💵", "📈", 
+    ifelse(on_time_rate >= 80, "✅", "⚠️"),
+    ifelse(mean(df$lead_time_days, na.rm = TRUE) <= 14, "✅", "⚠️"),
+    ifelse(avg_defect_rate <= 5, "✅", "⚠️"),
+    "📉",
+    ifelse(compliance_rate >= 85, "✅", "⚠️"),
+    ifelse(mean(df$order_status == "Cancelled") * 100 <= 5, "✅", "⚠️"),
+    "👥", "📦"
+  )
+)
+
+datatable(executive_summary, 
+          options = list(
+            pageLength = 15,
+            dom = 't',
+            ordering = FALSE,
+            columnDefs = list(
+              list(className = 'dt-center', targets = c(2))
+            )
+          ),
+          rownames = FALSE,
+          class = 'cell-border stripe') %>%
+  formatStyle(
+    'Metric',
+    fontWeight = 'bold',
+    fontSize = '14px'
+  ) %>%
+  formatStyle(
+    'Value',
+    fontSize = '14px',
+    color = '#2C3E50'
+  ) %>%
+  formatStyle(
+    'Status',
+    fontSize = '18px',
+    textAlign = 'center'
+  )
+```
+
+## Row {height="50%"}
+
+### {width="60%"}
+```{r}
+#| title: "Top Supplier Performance Scorecard"
+
+supplier_summary <- supplier_scorecard %>%
+  select(
+    Supplier = supplier,
+    `Overall Score` = overall_score,
+    `Price Score` = price_score,
+    `Delivery Score` = delivery_score,
+    `Quality Score` = quality_score,
+    `Compliance` = compliance_rate,
+    `Total Spend` = total_spend,
+    `Order Count` = order_count
+  ) %>%
+  mutate(
+    `Overall Score` = round(`Overall Score`, 1),
+    `Price Score` = round(`Price Score`, 1),
+    `Delivery Score` = round(`Delivery Score`, 1),
+    `Quality Score` = round(`Quality Score`, 1),
+    `Compliance` = round(`Compliance`, 1),
+    `Total Spend` = paste0("$", format(round(`Total Spend`, 0), big.mark = ","))
+  )
+
+datatable(supplier_summary,
+          options = list(
+            pageLength = 10,
+            order = list(list(1, 'desc')),
+            columnDefs = list(
+              list(className = 'dt-center', targets = c(1:7))
+            )
+          ),
+          rownames = FALSE,
+          class = 'cell-border stripe') %>%
+  formatStyle(
+    'Overall Score',
+    background = styleColorBar(c(0, 100), '#27AE60'),
+    backgroundSize = '100% 90%',
+    backgroundRepeat = 'no-repeat',
+    backgroundPosition = 'center'
+  ) %>%
+  formatStyle(
+    columns = c('Price Score', 'Delivery Score', 'Quality Score', 'Compliance'),
+    color = styleInterval(c(50, 75), c('#E74C3C', '#F39C12', '#27AE60')),
+    fontWeight = 'bold'
+  )
+```
+
+### {width="40%"}
+```{r}
+#| title: "Key Recommendations"
+
+recommendations <- data.frame(
+  Priority = c("🔴 High", "🔴 High", "🟡 Medium", "🟡 Medium", "🟢 Low"),
+  Recommendation = c(
+    "Address suppliers with defect rates >10%",
+    "Investigate late delivery patterns (>14 days)",
+    "Consolidate suppliers for better pricing power",
+    "Review non-compliant order processes",
+    "Maintain strong relationships with top performers"
+  ),
+  `Affected Area` = c(
+    "Quality Management",
+    "Supply Chain Operations",
+    "Strategic Sourcing",
+    "Compliance & Risk",
+    "Supplier Relations"
+  )
+)
+
+datatable(recommendations,
+          options = list(
+            pageLength = 5,
+            dom = 't',
+            ordering = FALSE
+          ),
+          rownames = FALSE,
+          class = 'cell-border stripe',
+          colnames = c("Priority", "Recommendation", "Affected Area")) %>%
+  formatStyle(
+    'Priority',
+    fontWeight = 'bold',
+    fontSize = '16px'
+  ) %>%
+  formatStyle(
+    'Recommendation',
+    fontSize = '14px',
+    fontWeight = 'bold',
+    color = '#2C3E50'
+  )
+```

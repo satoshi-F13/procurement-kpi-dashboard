@@ -1,0 +1,710 @@
+---
+title: "procurement_kpi"
+format: html
+---
+
+```{r}
+library(tidyverse)    # Data manipulation and visualization
+library(janitor)
+library(dplyr)        # Data manipulation
+library(ggplot2)      # Plotting
+library(flextable)    # Professional tables
+library(scales)       # Scale functions for plots
+library(ggrepel)      # Better label positioning
+library(viridis)      # Color palettes
+library(patchwork)    # Combine plots
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(countrycode)
+library(lubridate)
+
+```
+
+
+# Data
+```{r}
+df <- read_csv(file = "data/procurement_kpi_analysis_dataset.csv")
+
+dim(df)
+colnames(df)
+sum(is.na(df))
+skimr::skim(df)
+# missing values
+#Defective_Units	136	: replace to mean value.
+#Delivery_Date	87	: Ordered, but not delivered yet.
+```
+
+
+
+# Data preparation
+```{r}
+df <- 
+    df |> 
+    clean_names()
+# Handle NA values for deffectiv_units and delivery_date
+# For DEFECTIVE_UNITS:
+# Missing = No defects reported (assume 0 for delivered orders)
+df <- df %>%
+  mutate(
+    defective_units = case_when(
+      order_status == "Delivered" & is.na(defective_units) ~ 0,
+      order_status == "Cancelled" & is.na(defective_units) ~ 0,
+      order_status == "Pending" & is.na(defective_units) ~ 0,
+      order_status == "Partially Delivered" & is.na(defective_units)~ 0,
+      TRUE ~ defective_units
+    ),
+    # Flag for originally missing defect data
+    defect_data_missing = is.na(defective_units)
+  )
+
+# For DELIVERY_DATE:
+# Keep as NA if not delivered yet (Pending/Cancelled/Partially Delivered)
+# Flag problematic missing deliveries for "Delivered" status
+df <- df %>%
+  mutate(
+    delivery_date_issue = case_when(
+      order_status == "Delivered" & is.na(delivery_date) ~ "Missing for delivered",
+      order_status == "Pending" & is.na(delivery_date) ~ "Expected - Pending",
+      order_status == "Cancelled" & is.na(delivery_date) ~ "Nothing",
+      order_status == "Partially Delivered"& is.na(delivery_date)~ "Expected - Pending",
+      TRUE ~ "Nothing"
+    )
+  )
+
+# Check the NA handling
+df %>% 
+  count(order_status, delivery_date_issue, defect_data_missing) %>%
+  arrange(order_status)
+
+# NA in the "Partially Delivered" status 
+df |> 
+  filter(order_status == "Partially Delivered" & 
+         (is.na(delivery_date) | is.na(defective_units)))
+
+``` 
+
+
+### Feature Engineering
+```{r}
+df <- df %>%
+  mutate(
+    # Financial metrics
+    total_order_value = quantity * unit_price,
+    negotiated_total = quantity * negotiated_price,
+    savings_amount = total_order_value - negotiated_total,
+    savings_pct = (unit_price - negotiated_price) / unit_price * 100,
+    
+    # Time metrics
+    lead_time_days = as.numeric(delivery_date - order_date),
+    order_year = year(order_date),
+    order_quarter = quarter(order_date),
+    order_month = floor_date(order_date, "month"),
+    
+    # Quality metrics (only for non-NA defective_units)
+    defect_rate = ifelse(!is.na(defective_units), 
+                         defective_units / quantity * 100, 
+                         NA),
+    
+    # Leadtime category, "Short", "Likely Long", "Long"
+    lead_time_category = case_when(
+      is.na(lead_time_days) ~ NA,
+      lead_time_days <= 14 ~ "Short",
+      lead_time_days <= 30 ~ "Moderate",
+      TRUE ~ "Long"
+    ),
+    
+    # Compliance binary
+    compliant = ifelse(compliance == "Yes", 1, 0)
+  )
+
+# Summary of new features
+df %>%
+  select(total_order_value, savings_amount, savings_pct, 
+         lead_time_days, defect_rate, lead_time_category) %>%
+  summary()
+```
+
+
+
+## 2. EDA: Purchase Order Overview
+```{r}
+# Q1: POs issued over time
+po_timeline <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    po_count = n(),
+    total_spend = sum(total_order_value, na.rm = TRUE)
+  )
+
+# Visualization
+p1 <- ggplot(po_timeline, aes(x = order_month, y = po_count)) +
+  geom_line(color = "#2C3E50", linewidth = 1.2) +
+  geom_point(color = "#E74C3C", size = 2) +
+  labs(title = "Purchase Orders Over Time",
+       x = "Month", y = "Number of POs") +
+  theme_minimal() +
+  scale_y_continuous(labels = comma)
+
+# By supplier
+po_by_supplier <- df %>%
+  count(supplier, order_month) %>%
+  ggplot(aes(x = order_month, y = n, color = supplier)) +
+  geom_line(size = 1) +
+  labs(title = "PO Trend by Supplier",
+       x = "Month", y = "PO Count") +
+  theme_minimal()
+
+# Q2: Total spend by supplier and category
+spend_summary <- df %>%
+  group_by(supplier, item_category) %>%
+  summarise(
+    po_count = n(),
+    total_spend = sum(total_order_value),
+    avg_order_value = mean(total_order_value),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_spend))
+
+# Top suppliers by spend
+top_suppliers <- df %>%
+  group_by(supplier) %>%
+  summarise(total_spend = sum(total_order_value)) %>%
+  arrange(desc(total_spend)) %>%
+  mutate(
+    spend_pct = total_spend / sum(total_spend) * 100,
+    cum_pct = cumsum(spend_pct) # 5 supplies occupies the total order amount
+  )
+
+# Pareto chart
+p2 <- ggplot(top_suppliers, aes(x = reorder(supplier, -total_spend))) +
+  geom_col(aes(y = total_spend), fill = "#3498DB") +
+  geom_line(aes(y = cum_pct * max(total_spend) / 100, group = 1), 
+            color = "#E74C3C", linewidth = 1.2) +
+  geom_point(aes(y = cum_pct * max(total_spend) / 100), 
+             color = "#E74C3C", size = 3) +
+  scale_y_continuous(
+    labels = dollar,
+    sec.axis = sec_axis(~ . * 100 / max(top_suppliers$total_spend), 
+                        name = "Cumulative %", labels = percent_format(scale = 1))
+  ) +
+  labs(title = "Supplier Spend - Pareto Analysis",
+       x = "Supplier", y = "Total Spend") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Q4: Category spend share
+category_spend <- df %>%
+  group_by(item_category) %>%
+  summarise(total_spend = sum(total_order_value)) %>%
+  mutate(pct = total_spend / sum(total_spend) * 100) %>%
+  arrange(desc(total_spend))
+
+p3 <- ggplot(category_spend, aes(x = "", y = pct, fill = item_category)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar("y") +
+  scale_fill_viridis_d() +
+  labs(title = "Spend Distribution by Category",
+  fill = "Items"
+  ) +
+  theme_void() +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), 
+            position = position_stack(vjust = 0.5))
+```
+
+
+## 3. EDA: Cost & Price Analysis
+```{r}
+
+# Q1: Negotiated vs Unit Price achievement
+price_comparison <- df %>%
+  summarise(
+    total_orders = n(),
+    negotiated_lower = sum(negotiated_price < unit_price),
+    negotiated_same = sum(negotiated_price == unit_price),
+    negotiated_higher = sum(negotiated_price > unit_price),
+    pct_achieved_discount = mean(negotiated_price < unit_price) * 100
+  )
+
+print(price_comparison)
+
+# Q2: Average discount
+discount_stats <- df %>%
+  summarise(
+    avg_discount_pct = mean(savings_pct),
+    median_discount_pct = median(savings_pct),
+    total_savings = sum(savings_amount),
+    avg_savings_per_po = mean(savings_amount)
+  )
+
+print(discount_stats)
+
+# Q3: Best negotiators (suppliers)
+supplier_negotiations <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    po_count = n(),
+    avg_discount_pct = mean(savings_pct),
+    total_savings = sum(savings_amount),
+    avg_unit_price = mean(unit_price),
+    avg_negotiated = mean(negotiated_price)
+  ) %>%
+  arrange(desc(avg_discount_pct))
+
+p6 <- ggplot(supplier_negotiations, 
+             aes(x = reorder(supplier, avg_discount_pct), 
+                 y = avg_discount_pct)) +
+  geom_col(fill = "#27AE60") +
+  geom_text(aes(label = paste0(round(avg_discount_pct, 1), "%")), 
+            hjust = -0.2, size = 4) +
+  coord_flip() +
+  labs(title = "Average Discount Achieved by Supplier",
+       x = "Supplier", y = "Average Discount (%)") +
+  theme_minimal()
+
+# Q4: Total cost savings over time
+savings_timeline <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    total_savings = sum(savings_amount),
+    avg_discount = mean(savings_pct)
+  )
+
+p7 <- ggplot(savings_timeline, aes(x = order_month)) +
+  geom_line(aes(y = total_savings), color = "#27AE60", size = 1.2) +
+  geom_area(aes(y = total_savings), fill = "#27AE60", alpha = 0.3) +
+  labs(title = "Cost Savings from Negotiations Over Time",
+       x = "Month", y = "Total Savings ($)") +
+  scale_y_continuous(labels = dollar) +
+  theme_minimal()
+```
+
+
+## 4. EDA: Quality & Defect Analysis
+
+```{r}
+
+# Q1: Defect rate by supplier and category
+defect_analysis <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  group_by(supplier, item_category) %>%
+  summarise(
+    orders_with_data = n(),
+    total_defects = sum(defective_units),
+    total_units = sum(quantity),
+    avg_defect_rate = mean(defect_rate),
+    median_defect_rate = median(defect_rate),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_defect_rate))
+
+# Q2: Worst suppliers by defect rate
+supplier_quality <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  group_by(supplier) %>%
+  summarise(
+    orders = n(),
+    avg_defect_rate = mean(defect_rate),
+    total_defective = sum(defective_units),
+    high_defect_orders = sum(defect_rate > 10)
+  ) %>%
+  arrange(desc(avg_defect_rate))
+
+p8 <- ggplot(supplier_quality, 
+             aes(x = reorder(supplier, -avg_defect_rate), 
+                 y = avg_defect_rate)) +
+  geom_col(aes(fill = avg_defect_rate)) +
+  scale_fill_gradient(low = "#27AE60", high = "#E74C3C", 
+                      name = "Defect Rate %") +
+  geom_text(aes(label = paste0(round(avg_defect_rate, 2), "%")), 
+            vjust = -0.5, size = 4) +
+  labs(title = "Average Defect Rate by Supplier",
+       x = "Supplier", y = "Defect Rate (%)") +
+  scale_y_continuous(limits = c(0, 12))+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Q3: Price vs Quality correlation
+price_quality <- df %>%
+  filter(!is.na(defect_rate)) %>%
+  select(negotiated_price, defect_rate, supplier)
+
+cor_test <- cor.test(price_quality$negotiated_price, 
+                     price_quality$defect_rate)
+
+p9 <- ggplot(price_quality, aes(x = negotiated_price, y = defect_rate)) +
+  geom_point(aes(color = supplier), alpha = 0.6, size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linetype = "dashed") +
+  scale_color_viridis_d() +
+  labs(title = paste0("Price vs Defect Rate (r = ", 
+                      round(cor_test$estimate, 3), ")"),
+       subtitle = paste0("p-value = ", round(cor_test$p.value, 4)),
+       x = "Negotiated Price ($)", y = "Defect Rate (%)") +
+  theme_minimal()
+# p-value: 0.7 and r: 0.011 (almost 0 cofficient), so non relevancy between two.
+# Q4: Longer lead time vs defect rate
+longer_vs_defect <- df %>%
+  filter(!is.na(defect_rate), !is.na(lead_time_days)) %>%
+  mutate(delivery_status = ifelse(lead_time_days > 14, "Longer", "Short")) %>%
+  group_by(delivery_status) %>%
+  summarise(
+    count = n(),
+    avg_defect_rate = mean(defect_rate),
+    median_defect_rate = median(defect_rate)
+  )
+
+p10 <- ggplot(df %>% filter(!is.na(defect_rate), !is.na(lead_time_days)) %>%
+                mutate(delivery_status = ifelse(lead_time_days > 14, "Longer", "Short")),
+              aes(x = delivery_status, y = defect_rate, fill = delivery_status)) +
+  geom_boxplot() +
+  scale_fill_manual(values = c("Longer" = "#E74C3C", "Short" = "#27AE60")) +
+  labs(title = "Defect Rate: Longer vs Short Deliveries",
+       x = "Delivery Status", y = "Defect Rate (%)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+# Same box plot shape and position. No significant factors for both
+```
+
+
+## 5. EDA: Compliance & Reliability
+
+```{r}
+# Q1: Compliance rate by supplier
+compliance_by_supplier <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    total_orders = n(),
+    compliant_orders = sum(compliant),
+    compliance_rate = mean(compliant) * 100
+  ) %>%
+  arrange(desc(compliance_rate))
+
+p11 <- ggplot(compliance_by_supplier, 
+              aes(x = reorder(supplier, compliance_rate), 
+                  y = compliance_rate)) +
+  geom_col(aes(fill = compliance_rate)) +
+  scale_fill_gradient(low = "#E74C3C", high = "#27AE60", 
+                      name = "Compliance %") +
+  geom_text(aes(label = paste0(round(compliance_rate, 1), "%")), 
+            hjust = -0.2, size = 4) +
+  coord_flip() +
+  ylim(0, 120) +
+  labs(title = "Supplier Compliance Rates",
+       x = "Supplier", y = "Compliance Rate (%)") +
+  theme_minimal()
+
+# Q2: Non-compliant orders analysis
+non_compliance_impact <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(compliance) %>%
+  summarise(
+    count = n(),
+    avg_lead_time = mean(lead_time_days),
+    pct_late = mean(lead_time_days > 14) * 100,
+    avg_defect_rate = mean(defect_rate)
+  )
+
+print(non_compliance_impact)
+
+# Q4: Compliance trend over time
+compliance_trend <- df %>%
+  group_by(order_month) %>%
+  summarise(
+    compliance_rate = mean(compliant) * 100,
+    orders = n()
+  )
+
+p12 <- ggplot(compliance_trend, aes(x = order_month, y = compliance_rate)) +
+  geom_line(color = "#2C3E50", size = 1.2) +
+  geom_point(aes(size = orders), color = "#3498DB", alpha = 0.6) +
+  geom_smooth(method = "loess", se = TRUE, color = "#E74C3C", 
+              linetype = "dashed") +
+  labs(title = "Compliance Rate Trend Over Time",
+       x = "Month", y = "Compliance Rate (%)") +
+  theme_minimal()
+```
+
+
+## 6. EDA: Order Status & Workflow
+
+```{r}
+
+# Q1: Order status distribution
+status_summary <- df %>%
+  count(order_status) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  arrange(desc(n))
+
+p13 <- ggplot(status_summary, aes(x = reorder(order_status, n), y = n)) +
+  geom_col(fill = "#3498DB") +
+  geom_text(aes(label = paste0(n, "\n(", round(pct, 1), "%)")), 
+            hjust = -0.2, size = 4) +
+  coord_flip() +
+  scale_y_continuous(limits = c(0, 700))+
+  labs(title = "Purchase Order Status Distribution",
+       x = "Order Status", y = "Count") +
+  theme_minimal()
+
+# Q2: Cancellation rates by supplier
+cancellation_analysis <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    total_orders = n(),
+    cancelled = sum(order_status == "Cancelled"),
+    cancellation_rate = cancelled / total_orders * 100
+  ) %>%
+  arrange(desc(cancellation_rate))
+
+# By category
+category_cancellation <- df %>%
+  group_by(item_category) %>%
+  summarise(
+    total_orders = n(),
+    cancelled = sum(order_status == "Cancelled"),
+    cancellation_rate = cancelled / total_orders * 100
+  ) %>%
+  arrange(desc(cancellation_rate))
+
+# Q3: Order size by status
+order_size_by_status <- df %>%
+  group_by(order_status) %>%
+  summarise(
+    count = n(),
+    avg_quantity = mean(quantity),
+    median_quantity = median(quantity),
+    avg_value = mean(total_order_value)
+  )
+
+p14 <- ggplot(df, aes(x = order_status, y = quantity, fill = order_status)) +
+  geom_boxplot() +
+  scale_y_log10(labels = comma) +
+  scale_fill_viridis_d() +
+  labs(title = "Order Size Distribution by Status",
+       x = "Order Status", y = "Quantity (log scale)") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Q4: Repeat orders
+repeat_orders <- df %>%
+  group_by(supplier, item_category) %>%
+  summarise(
+    order_count = n(),
+    .groups = "drop"
+  ) %>%
+  filter(order_count > 1) %>%
+  arrange(desc(order_count))
+```
+
+
+## 7.Strategic Insights Dashboard
+
+```{r}
+# Q1: Supplier scorecard (Price + Timeliness + Quality)
+supplier_scorecard <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(supplier) %>%
+  summarise(
+    # Price performance (higher discount = better)
+    avg_discount = mean(savings_pct),
+    price_score = scales::rescale(avg_discount, to = c(0, 100)),
+    
+    # Delivery performance (lower lead time = better)
+    avg_lead_time = mean(lead_time_days),
+    short_lead_pct = mean(lead_time_days <= 14) * 100,
+    delivery_score = short_lead_pct,
+    
+    # Quality performance (lower defect = better)
+    avg_defect_rate = mean(defect_rate),
+    quality_score = 100 - scales::rescale(avg_defect_rate, to = c(0, 100)),
+    
+    # Compliance
+    compliance_rate = mean(compliant) * 100,
+    
+    # Overall composite score
+    overall_score = (price_score + delivery_score + quality_score + compliance_rate) / 4,
+    
+    # Volume
+    total_spend = sum(total_order_value),
+    order_count = n()
+  ) %>%
+  arrange(desc(overall_score))
+
+print(supplier_scorecard)
+
+# Visualization: Scatter plot matrix
+p15 <- ggplot(supplier_scorecard, 
+              aes(x = delivery_score, y = quality_score)) +
+  geom_point(aes(size = total_spend, color = price_score), alpha = 0.7) +
+  geom_text_repel(aes(label = supplier), size = 3.5) +
+  scale_color_gradient(low = "#E74C3C", high = "#27AE60", 
+                       name = "Price Score") +
+  scale_size_continuous(name = "Total Spend", labels = dollar) +
+  labs(title = "Supplier Performance Matrix",
+       subtitle = "Quality vs Delivery (bubble size = spend)",
+       x = "Delivery Score", y = "Quality Score") +
+  theme_minimal()
+
+# Q2: Supplier consolidation opportunities
+consolidation_analysis <- df %>%
+  group_by(item_category) %>%
+  summarise(
+    unique_suppliers = n_distinct(supplier),
+    total_orders = n(),
+    total_spend = sum(total_order_value)
+  ) %>%
+  arrange(desc(unique_suppliers))
+
+# Q3: Trend analysis
+trend_analysis <- df %>%
+  filter(!is.na(lead_time_days), !is.na(defect_rate)) %>%
+  group_by(order_quarter, order_year) %>%
+  summarise(
+    avg_lead_time = mean(lead_time_days),
+    avg_defect_rate = mean(defect_rate),
+    compliance_rate = mean(compliant) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(period = paste0(order_year, "-Q", order_quarter))
+
+p16 <- trend_analysis %>%
+  pivot_longer(cols = c(avg_lead_time, avg_defect_rate, compliance_rate),
+               names_to = "metric", values_to = "value") %>%
+  ggplot(aes(x = period, y = value, color = metric, group = metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  facet_wrap(~metric, scales = "free_y", ncol = 1) +
+  scale_color_viridis_d() +
+  labs(title = "Key Performance Metrics Over Time",
+       x = "Quarter", y = "Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+# Q4: Risk matrix
+risk_analysis <- df %>%
+  group_by(supplier) %>%
+  summarise(
+    avg_price = mean(unit_price),
+    avg_defect_rate = mean(defect_rate, na.rm = TRUE),
+    total_spend = sum(total_order_value),
+    compliance_rate = mean(compliant) * 100
+  ) %>%
+    # Make a risk category
+  mutate(
+    risk_category = case_when(
+      avg_price > median(avg_price) & avg_defect_rate > median(avg_defect_rate, na.rm = TRUE) ~ "High Risk",
+      avg_price < median(avg_price) & avg_defect_rate < median(avg_defect_rate, na.rm = TRUE) ~ "Low Risk",
+      avg_price > median(avg_price) ~ "High Cost",
+      TRUE ~ "Quality Concern"
+    )
+  )
+
+p17 <- ggplot(risk_analysis, aes(x = avg_price, y = avg_defect_rate)) +
+  geom_point(aes(size = total_spend, color = risk_category), alpha = 0.7) +
+  geom_text_repel(aes(label = supplier), size = 3.5) +
+  geom_vline(xintercept = median(risk_analysis$avg_price), 
+             linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = median(risk_analysis$avg_defect_rate, na.rm = TRUE), 
+             linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = c("High Risk" = "#E74C3C", 
+                                 "Low Risk" = "#27AE60",
+                                 "High Cost" = "#F39C12",
+                                 "Quality Concern" = "#3498DB")) +
+  labs(title = "Supplier Risk Matrix",
+       subtitle = "Quadrant analysis: Price vs Quality",
+       x = "Average Unit Price ($)", y = "Average Defect Rate (%)") +
+  theme_minimal()
+```
+
+
+## 8. Summary Report Generation
+
+```{r}
+# Executive summary table
+executive_summary <- data.frame(
+  Metric = c("Total Purchase Orders", "Total Spend", "Total Savings",
+             "On-Time Delivery Rate", "Average Defect Rate", 
+             "Compliance Rate", "Active Suppliers"),
+  Value = c(
+    nrow(df),
+    dollar(sum(df$total_order_value)),
+    dollar(sum(df$savings_amount)),
+    paste0(round(mean(df$lead_time_days <= 14, na.rm = TRUE) * 100, 1), "%"),
+    paste0(round(mean(df$defect_rate, na.rm = TRUE), 2), "%"),
+    paste0(round(mean(df$compliant) * 100, 1), "%"),
+    n_distinct(df$supplier)
+  )
+) 
+
+table_executive_summary <- 
+    executive_summary |> 
+  flextable() %>%
+  theme_booktabs() %>%
+  autofit()
+
+print(table_executive_summary)
+
+# Supplier ranking table
+supplier_ranking <- supplier_scorecard %>%
+  select(supplier, overall_score, delivery_score, quality_score, 
+         price_score, compliance_rate, total_spend) %>%
+  arrange(desc(overall_score)) %>%
+  mutate(across(c(overall_score:compliance_rate), ~round(., 1))) %>%
+  flextable() %>%
+  colformat_double(j = "total_spend", big.mark = ",", prefix = "$") %>%
+  color(j = "overall_score", 
+        color = scales::col_numeric(palette = c("#E74C3C", "#F39C12", "#27AE60"), 
+                                    domain = c(0, 100))) %>%
+  theme_booktabs() %>%
+  autofit()
+
+print(supplier_ranking)
+
+# Save all plots
+#ggsave("po_timeline.png", p1, width = 12, height = 6)
+#ggsave("supplier_pareto.png", p2, width = 12, height = 6)
+#ggsave("delivery_performance.png", p4, width = 10, height = 6)
+#ggsave("supplier_scorecard.png", p15, width = 12, height = 8)
+#ggsave("risk_matrix.png", p17, width = 12, height = 8)
+
+# Combine plots for dashboard
+#dashboard <- (p1 + p2) / (p8) / (p15 + p17)
+#ggsave("procurement_dashboard.png", dashboard, width = 16, height = 20)
+```
+
+## 10. Export Analysis Results
+
+```{r}
+
+# Export cleaned data
+write_csv(df, "data/procurement_cleaned.csv")
+
+# Export summary tables
+write_csv(supplier_scorecard, "data/supplier_scorecard.csv")
+write_csv(spend_summary, "data/spend_by_supplier_category.csv")
+write_csv(defect_analysis, "data/quality_analysis.csv")
+write_csv(compliance_by_supplier, "data/compliance_report.csv")
+
+# Create Excel workbook with multiple sheets
+library(openxlsx)
+wb <- createWorkbook()
+
+addWorksheet(wb, "Executive Summary")
+writeData(wb, "Executive Summary", executive_summary)
+
+addWorksheet(wb, "Supplier Scorecard")
+writeData(wb, "Supplier Scorecard", supplier_scorecard)
+
+addWorksheet(wb, "Spend Analysis")
+writeData(wb, "Spend Analysis", spend_summary)
+
+
+
+addWorksheet(wb, "Quality Analysis")
+writeData(wb, "Quality Analysis", defect_analysis)
+
+saveWorkbook(wb, "data/Procurement_Analysis_Report.xlsx", overwrite = TRUE)
+
+print("✅ Analysis complete! All files exported.")
+```
