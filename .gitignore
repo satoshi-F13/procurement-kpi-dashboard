@@ -1,3 +1,2 @@
 # Ignore .qmd files in a specific folder
-note/*.qmd
-note/*.html
+/note/
